@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend Tests & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements-dev.txt
+
+      - name: Verify Alembic migrations configuration
+        run: |
+          alembic -c backend/alembic.ini heads
+
+      - name: Run pytest test suite
+        run: |
+          pytest backend/tests -v
+
+  frontend:
+    name: Frontend Typecheck & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run svelte-check
+        working-directory: frontend
+        run: npm run check
+
+      - name: Build production bundle
+        working-directory: frontend
+        run: npm run build
+
+  docker-compose:
+    name: Docker Compose Integration & Health Check
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare environment file
+        run: |
+          cp .env.example .env
+
+      - name: Validate Compose configuration
+        run: |
+          docker compose config
+
+      - name: Build and launch services
+        run: |
+          docker compose up -d --build
+
+      - name: Wait for services to become healthy
+        run: |
+          echo "Waiting for services to report healthy status..."
+          timeout 90s bash -c '
+            until [ "$(docker compose ps --filter "health=healthy" -q | wc -l)" -eq 3 ]; do
+              echo "Containers status:"
+              docker compose ps
+              sleep 5
+            done
+          '
+
+      - name: Test /api/health endpoint via frontend reverse proxy
+        run: |
+          response=$(curl -s --fail --retry 5 --retry-delay 2 http://localhost:3041/api/health)
+          echo "Received response: $response"
+          echo "$response" | grep -q '"status":"operational"' || {
+            echo "Error: Application is not reporting operational status"
+            exit 1
+          }
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          docker compose logs
+
+      - name: Tear down services
+        if: always()
+        run: |
+          docker compose down -v

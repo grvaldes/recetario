@@ -1,0 +1,84 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: recetario_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-recetario}
+      POSTGRES_USER: ${POSTGRES_USER:-recetario}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-recetario_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recetario} -d ${POSTGRES_DB:-recetario}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    # Note: PostgreSQL is NOT exposed to host ports by default for security
+    networks:
+      - recetario_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: recetario_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_NAME: ${APP_NAME:-Recetario}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      VERSION: ${VERSION:-0.1.0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      POSTGRES_SERVER: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-recetario}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-recetario_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-recetario}
+      UPLOAD_DIR: /app/uploads
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3041,http://127.0.0.1:3041}
+    volumes:
+      - recipe_uploads:/app/uploads
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8041/api/health')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - recetario_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: recetario_frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${PORT:-3041}:8041"
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:8041/ || exit 1" ]
+      interval: 10s
+
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - recetario_network
+
+volumes:
+  postgres_data:
+    name: recetario_postgres_data
+  recipe_uploads:
+    name: recetario_recipe_uploads
+
+networks:
+  recetario_network:
+    name: recetario_network
+    driver: bridge
